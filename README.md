@@ -2,6 +2,16 @@
 
 Turn your Android phone into a low-latency wireless **trackpad and keyboard** for your Windows PC.
 
+## Screenshots
+
+| Trackpad (Folded) | Tactical PC Keyboard |
+| :---: | :---: |
+| <img src="docs/screenshots/android_trackpad.png" width="240" alt="DeskPad Android Trackpad" /> | <img src="docs/screenshots/android_keyboard.png" width="240" alt="DeskPad Android Keyboard" /> |
+
+| Galaxy Z Fold Split Workspace (`>= 600dp`) | Windows PC Companion (`DeskPadPC.exe`) |
+| :---: | :---: |
+| <img src="docs/screenshots/fold_split_view.png" width="380" alt="DeskPad Unfolded Split Layout" /> | <img src="docs/screenshots/windows_companion.png" width="320" alt="DeskPad Windows Companion" /> |
+
 ## Features
 
 - **Precision Multi-Touch Trackpad**: 1-finger pointer acceleration with sub-pixel remainder tracking, tap-to-click, double-tap-and-drag, 2-finger tap (right click), 2-finger vertical/horizontal scroll (with Natural Scrolling toggle), pinch-to-zoom, 3-finger middle click, and press-and-hold mouse buttons.

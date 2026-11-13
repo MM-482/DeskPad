@@ -232,12 +232,18 @@ class BluetoothHidManager(private val context: Context) {
 
     @SuppressLint("MissingPermission")
     fun sendKey(key: SpecialKey, modifiers: ModifierState) {
+        if (key == SpecialKey.WIN) {
+            val withWin = modifiers.copy(win = true)
+            sendKeyboardUsage(modifierByte(withWin, extraShift = false), 0)
+            return
+        }
         val consumerCode = specialKeyToConsumerUsage(key)
         if (consumerCode != null) {
             val hid = hidDevice ?: return
             val host = hostDevice ?: return
             if (!hasPermissions()) return
             hid.sendReport(host, REPORT_ID_CONSUMER, byteArrayOf(consumerCode.toByte(), 0))
+            Thread.sleep(6)
             hid.sendReport(host, REPORT_ID_CONSUMER, byteArrayOf(0, 0))
             return
         }
@@ -251,6 +257,7 @@ class BluetoothHidManager(private val context: Context) {
         val host = hostDevice ?: return
         if (!hasPermissions()) return
         hid.sendReport(host, REPORT_ID_KEYBOARD, byteArrayOf(modByte, 0, usage, 0, 0, 0, 0, 0))
+        Thread.sleep(6)
         hid.sendReport(host, REPORT_ID_KEYBOARD, byteArrayOf(0, 0, 0, 0, 0, 0, 0, 0))
     }
 
