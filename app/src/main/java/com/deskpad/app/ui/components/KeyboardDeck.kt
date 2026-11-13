@@ -1,6 +1,14 @@
 package com.deskpad.app.ui.components
 
+import android.content.Context
+import android.text.InputType
 import android.view.HapticFeedbackConstants
+import android.view.KeyEvent
+import android.view.View
+import android.view.inputmethod.BaseInputConnection
+import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputConnection
+import android.view.inputmethod.InputMethodManager
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -17,36 +25,24 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.input.key.Key
-import androidx.compose.ui.input.key.KeyEventType
-import androidx.compose.ui.input.key.key
-import androidx.compose.ui.input.key.onPreviewKeyEvent
-import androidx.compose.ui.input.key.type
-import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
-import androidx.compose.ui.text.TextRange
-import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
 import com.deskpad.app.model.ModifierState
 import com.deskpad.app.model.SpecialKey
 import com.deskpad.app.ui.theme.LocalDeskPadPalette
@@ -247,15 +243,28 @@ private fun SystemImeBridge(
     onEnter: () -> Unit
 ) {
     val palette = LocalDeskPadPalette.current
-    val focusRequester = remember { FocusRequester() }
-    val keyboardController = LocalSoftwareKeyboardController.current
-    // Keep a sentinel character so Backspace on Android IME always emits a delete event
-    val sentinel = "\u200B"
-    var fieldValue by remember { mutableStateOf(TextFieldValue(sentinel, TextRange(1))) }
+    val context = LocalContext.current
+    val latestSendText by rememberUpdatedState(onSendText)
+    val latestBackspace by rememberUpdatedState(onBackspace)
+    val latestEnter by rememberUpdatedState(onEnter)
+    var composingPreview by remember { mutableStateOf("") }
+    var lastSentPreview by remember { mutableStateOf("") }
+    var inputViewRef by remember { mutableStateOf<ImeBridgeView?>(null) }
 
-    LaunchedEffect(Unit) {
-        focusRequester.requestFocus()
-        keyboardController?.show()
+    fun openSoftKeyboard(target: View?) {
+        target ?: return
+        target.requestFocus()
+        val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+        imm?.showSoftInput(target, InputMethodManager.SHOW_IMPLICIT)
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+            inputViewRef?.let { view ->
+                imm?.hideSoftInputFromWindow(view.windowToken, 0)
+            }
+        }
     }
 
     Box(
@@ -264,10 +273,7 @@ private fun SystemImeBridge(
             .clip(RoundedCornerShape(14.dp))
             .background(palette.padSurface)
             .border(1.dp, palette.border, RoundedCornerShape(14.dp))
-            .clickable {
-                focusRequester.requestFocus()
-                keyboardController?.show()
-            }
+            .clickable { openSoftKeyboard(inputViewRef) }
             .padding(14.dp)
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -278,51 +284,189 @@ private fun SystemImeBridge(
                 fontWeight = FontWeight.SemiBold
             )
             Text(
-                text = "Type, swipe, or dictate with your phone keyboard — keystrokes stream directly to your PC.",
+                text = "Tap here to type, swipe, or dictate with Samsung Keyboard / Gboard.",
                 color = palette.textMuted,
                 fontSize = 12.sp
             )
-            BasicTextField(
-                value = fieldValue,
-                onValueChange = { updated ->
-                    val text = updated.text
-                    if (text.isEmpty()) {
-                        onBackspace()
-                    } else if (text.length > sentinel.length) {
-                        val added = if (text.startsWith(sentinel)) {
-                            text.substring(sentinel.length)
-                        } else {
-                            text.replace(sentinel, "")
-                        }
-                        if (added.isNotEmpty()) {
-                            if (added == "\n") {
-                                onEnter()
-                            } else {
-                                onSendText(added)
+            if (composingPreview.isNotEmpty() || lastSentPreview.isNotEmpty()) {
+                Text(
+                    text = if (composingPreview.isNotEmpty()) "Typing: $composingPreview" else "Sent: $lastSentPreview",
+                    color = palette.textPrimary,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium
+                )
+            }
+            AndroidView(
+                factory = { ctx ->
+                    ImeBridgeView(
+                        context = ctx,
+                        onCommit = { text ->
+                            composingPreview = ""
+                            if (text == "\n") {
+                                lastSentPreview = "Enter"
+                                latestEnter()
+                            } else if (text.isNotEmpty()) {
+                                val normalized = text.replace("\r\n", "\n")
+                                if (normalized.endsWith("\n") && normalized.length > 1) {
+                                    val body = normalized.dropLast(1)
+                                    lastSentPreview = body
+                                    latestSendText(body)
+                                    latestEnter()
+                                } else {
+                                    lastSentPreview = normalized.takeLast(24)
+                                    latestSendText(normalized)
+                                }
                             }
+                        },
+                        onComposing = { partial -> composingPreview = partial },
+                        onBackspace = {
+                            lastSentPreview = "Backspace"
+                            latestBackspace()
+                        },
+                        onEnter = {
+                            composingPreview = ""
+                            lastSentPreview = "Enter"
+                            latestEnter()
                         }
+                    ).also { view ->
+                        inputViewRef = view
+                        view.post { openSoftKeyboard(view) }
                     }
-                    fieldValue = TextFieldValue(sentinel, TextRange(1))
                 },
-                textStyle = TextStyle(color = palette.textPrimary, fontSize = 14.sp),
-                cursorBrush = SolidColor(palette.accent),
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-                keyboardActions = KeyboardActions(onSend = { onEnter() }),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .focusRequester(focusRequester)
-                    .onPreviewKeyEvent { event ->
-                        if (event.type == KeyEventType.KeyDown && event.key == Key.Backspace) {
+                    .height(22.dp)
+            )
+        }
+    }
+}
+
+private class ImeBridgeView(
+    context: Context,
+    private val onCommit: (String) -> Unit,
+    private val onComposing: (String) -> Unit,
+    private val onBackspace: () -> Unit,
+    private val onEnter: () -> Unit
+) : View(context) {
+    private var composingBuffer: String = ""
+
+    init {
+        isFocusable = true
+        isFocusableInTouchMode = true
+        setOnKeyListener { _, keyCode, event ->
+            if (event.action == KeyEvent.ACTION_DOWN) {
+                when (keyCode) {
+                    KeyEvent.KEYCODE_DEL -> {
+                        if (composingBuffer.isNotEmpty()) {
+                            composingBuffer = composingBuffer.dropLast(1)
+                            onComposing(composingBuffer)
+                        } else {
                             onBackspace()
-                            true
-                        } else if (event.type == KeyEventType.KeyDown && event.key == Key.Enter) {
-                            onEnter()
+                        }
+                        true
+                    }
+                    KeyEvent.KEYCODE_ENTER -> {
+                        flushComposing()
+                        onEnter()
+                        true
+                    }
+                    else -> {
+                        val unicode = event.unicodeChar
+                        if (unicode > 0) {
+                            flushComposing()
+                            onCommit(unicode.toChar().toString())
                             true
                         } else {
                             false
                         }
                     }
-            )
+                }
+            } else {
+                false
+            }
+        }
+    }
+
+    private fun flushComposing() {
+        if (composingBuffer.isNotEmpty()) {
+            val pending = composingBuffer
+            composingBuffer = ""
+            onCommit(pending)
+        }
+    }
+
+    override fun onCheckIsTextEditor(): Boolean = true
+
+    override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection {
+        outAttrs.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+        outAttrs.imeOptions = EditorInfo.IME_ACTION_SEND or EditorInfo.IME_FLAG_NO_EXTRACT_UI
+        return object : BaseInputConnection(this, false) {
+            override fun setComposingText(text: CharSequence?, newCursorPosition: Int): Boolean {
+                composingBuffer = text?.toString().orEmpty()
+                onComposing(composingBuffer)
+                return true
+            }
+
+            override fun finishComposingText(): Boolean {
+                flushComposing()
+                onComposing("")
+                return true
+            }
+
+            override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean {
+                composingBuffer = ""
+                onComposing("")
+                val str = text?.toString().orEmpty()
+                if (str.isNotEmpty()) {
+                    onCommit(str)
+                }
+                return true
+            }
+
+            override fun deleteSurroundingText(beforeLength: Int, afterLength: Int): Boolean {
+                if (beforeLength > 0) {
+                    repeat(beforeLength) {
+                        if (composingBuffer.isNotEmpty()) {
+                            composingBuffer = composingBuffer.dropLast(1)
+                            onComposing(composingBuffer)
+                        } else {
+                            onBackspace()
+                        }
+                    }
+                }
+                return true
+            }
+
+            override fun sendKeyEvent(event: KeyEvent?): Boolean {
+                if (event != null && event.action == KeyEvent.ACTION_DOWN) {
+                    when (event.keyCode) {
+                        KeyEvent.KEYCODE_DEL -> {
+                            deleteSurroundingText(1, 0)
+                            return true
+                        }
+                        KeyEvent.KEYCODE_ENTER -> {
+                            flushComposing()
+                            onEnter()
+                            return true
+                        }
+                        else -> {
+                            val ch = event.unicodeChar
+                            if (ch > 0) {
+                                flushComposing()
+                                onCommit(ch.toChar().toString())
+                                return true
+                            }
+                        }
+                    }
+                }
+                return super.sendKeyEvent(event)
+            }
+
+            override fun performEditorAction(editorAction: Int): Boolean {
+                flushComposing()
+                onEnter()
+                return true
+            }
         }
     }
 }

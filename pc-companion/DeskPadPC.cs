@@ -744,8 +744,8 @@ namespace DeskPadPC
                 string val = msg.ContainsKey("v") ? Convert.ToString(msg["v"]) : "";
                 if (!string.IsNullOrEmpty(val))
                 {
-                    Win32Input.SendText(val);
-                    _onActivity("Typing text");
+                    bool ok = Win32Input.SendText(val);
+                    _onActivity(ok ? "Typing text" : "Blocked: target window is Admin");
                 }
             }
             else if (type == "key")
@@ -760,8 +760,8 @@ namespace DeskPadPC
                         foreach (object m in rawMods) if (m != null) mods.Add(m.ToString());
                     }
                 }
-                Win32Input.SendKey(k, mods);
-                _onActivity("Key: " + k);
+                bool ok = Win32Input.SendKey(k, mods);
+                _onActivity(ok ? ("Key: " + k) : "Blocked: target window is Admin");
             }
         }
     }
@@ -859,10 +859,17 @@ namespace DeskPadPC
 
         [DllImport("user32.dll", SetLastError = true)]
         private static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
+        [DllImport("user32.dll")]
+        private static extern uint MapVirtualKey(uint uCode, uint uMapType);
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetKeyboardLayout(uint idThread);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern short VkKeyScanEx(char ch, IntPtr dwhkl);
 
-        private static void Dispatch(params INPUT[] inputs)
+        private static bool Dispatch(params INPUT[] inputs)
         {
-            if (inputs.Length > 0) SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(INPUT)));
+            if (inputs.Length == 0) return true;
+            return SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(INPUT))) > 0;
         }
 
         public static void Move(int dx, int dy)
@@ -916,43 +923,80 @@ namespace DeskPadPC
             for (int i = 0; i < n; i++) { MouseButton(button, true); MouseButton(button, false); }
         }
 
-        private static void KeyVk(ushort vk, bool down)
+        private static INPUT MakeVkInput(ushort vk, bool down)
         {
             uint flags = down ? 0 : KEYEVENTF_KEYUP;
             if (ExtendedVks.Contains(vk)) flags |= KEYEVENTF_EXTENDEDKEY;
+            ushort scan = (ushort)MapVirtualKey(vk, 0);
             var inp = new INPUT { type = INPUT_KEYBOARD };
-            inp.u.ki = new KEYBDINPUT { wVk = vk, dwFlags = flags };
-            Dispatch(inp);
+            inp.u.ki = new KEYBDINPUT { wVk = vk, wScan = scan, dwFlags = flags };
+            return inp;
         }
 
-        public static void SendText(string text)
+        private static bool KeyVk(ushort vk, bool down)
         {
-            var inputs = new List<INPUT>(text.Length * 2);
+            return Dispatch(MakeVkInput(vk, down));
+        }
+
+        public static bool SendText(string text)
+        {
+            var inputs = new List<INPUT>(text.Length * 4);
+            IntPtr layout = GetKeyboardLayout(0);
             for (int i = 0; i < text.Length; i++)
             {
-                ushort codeUnit = text[i];
-                var d = new INPUT { type = INPUT_KEYBOARD };
-                d.u.ki = new KEYBDINPUT { wScan = codeUnit, dwFlags = KEYEVENTF_UNICODE };
-                var u = new INPUT { type = INPUT_KEYBOARD };
-                u.u.ki = new KEYBDINPUT { wScan = codeUnit, dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP };
-                inputs.Add(d);
-                inputs.Add(u);
+                char ch = text[i];
+                if (ch == '\r') continue;
+                if (ch == '\n')
+                {
+                    inputs.Add(MakeVkInput(0x0D, true));
+                    inputs.Add(MakeVkInput(0x0D, false));
+                    continue;
+                }
+                if (ch == '\t')
+                {
+                    inputs.Add(MakeVkInput(0x09, true));
+                    inputs.Add(MakeVkInput(0x09, false));
+                    continue;
+                }
+
+                short mapped = (ch >= 32 && ch <= 126) ? VkKeyScanEx(ch, layout) : (short)-1;
+                if (mapped != -1 && ((mapped >> 8) & 0x06) == 0)
+                {
+                    ushort vk = (ushort)(mapped & 0xFF);
+                    bool needShift = ((mapped >> 8) & 0x01) != 0;
+                    if (needShift) inputs.Add(MakeVkInput(0x10, true));
+                    inputs.Add(MakeVkInput(vk, true));
+                    inputs.Add(MakeVkInput(vk, false));
+                    if (needShift) inputs.Add(MakeVkInput(0x10, false));
+                }
+                else
+                {
+                    ushort codeUnit = ch;
+                    var d = new INPUT { type = INPUT_KEYBOARD };
+                    d.u.ki = new KEYBDINPUT { wScan = codeUnit, dwFlags = KEYEVENTF_UNICODE };
+                    var u = new INPUT { type = INPUT_KEYBOARD };
+                    u.u.ki = new KEYBDINPUT { wScan = codeUnit, dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP };
+                    inputs.Add(d);
+                    inputs.Add(u);
+                }
             }
-            if (inputs.Count > 0) Dispatch(inputs.ToArray());
+            return inputs.Count == 0 || Dispatch(inputs.ToArray());
         }
 
-        public static void SendKey(string keyName, List<string> modifiers)
+        public static bool SendKey(string keyName, List<string> modifiers)
         {
             var modVks = new List<ushort>();
+            bool ok = true;
             foreach (string mod in modifiers)
             {
                 ushort mvk;
-                if (VkMap.TryGetValue(mod, out mvk)) { modVks.Add(mvk); KeyVk(mvk, true); }
+                if (VkMap.TryGetValue(mod, out mvk)) { modVks.Add(mvk); ok &= KeyVk(mvk, true); }
             }
             ushort? vk = ResolveVk(keyName);
-            if (vk.HasValue) { KeyVk(vk.Value, true); KeyVk(vk.Value, false); }
-            else if (keyName.Length == 1) SendText(keyName);
+            if (vk.HasValue) { ok &= KeyVk(vk.Value, true); ok &= KeyVk(vk.Value, false); }
+            else if (keyName.Length == 1) ok &= SendText(keyName);
             for (int i = modVks.Count - 1; i >= 0; i--) KeyVk(modVks[i], false);
+            return ok;
         }
 
         private static ushort? ResolveVk(string keyName)
