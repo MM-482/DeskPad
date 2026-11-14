@@ -64,7 +64,6 @@ data class AppSettings(
     val transportMode: TransportMode = TransportMode.WIFI,
     val lastHostIp: String = "",
     val lastHostPort: Int = ProtocolCodec.DEFAULT_TCP_PORT,
-    val lastHostUdpPort: Int = ProtocolCodec.DEFAULT_UDP_PORT,
     val lastHostName: String = ""
 )
 
@@ -84,7 +83,6 @@ class SettingsStore(context: Context) {
         }.getOrDefault(TransportMode.WIFI),
         lastHostIp = prefs.getString("last_ip", "") ?: "",
         lastHostPort = prefs.getInt("last_port", ProtocolCodec.DEFAULT_TCP_PORT),
-        lastHostUdpPort = prefs.getInt("last_udp_port", ProtocolCodec.DEFAULT_UDP_PORT),
         lastHostName = prefs.getString("last_host_name", "") ?: ""
     )
 
@@ -100,7 +98,7 @@ class SettingsStore(context: Context) {
             .putString("transport_mode", settings.transportMode.name)
             .putString("last_ip", settings.lastHostIp)
             .putInt("last_port", settings.lastHostPort)
-            .putInt("last_udp_port", settings.lastHostUdpPort)
+            .remove("last_udp_port")
             .putString("last_host_name", settings.lastHostName)
             .apply()
     }

@@ -1,16 +1,19 @@
 import json
 import unittest
-from deskpad_server import NoopOrXdotoolInjector, handle_tcp_command, handle_udp_packet
+from deskpad_server import NoopOrXdotoolInjector, handle_tcp_command
+from unittest import mock
 
 
 class TestDeskPadServer(unittest.TestCase):
     def setUp(self):
-        self.inj = NoopOrXdotoolInjector()
+        with mock.patch('deskpad_server.subprocess.run') as run:
+            run.return_value.returncode = 1
+            self.inj = NoopOrXdotoolInjector()
 
-    def test_udp_move_scroll_zoom(self):
-        handle_udp_packet("M|12|-7", self.inj)
-        handle_udp_packet("S|0|4", self.inj)
-        handle_udp_packet("Z|-2", self.inj)
+    def test_authenticated_command_dispatch_move_scroll_zoom(self):
+        handle_tcp_command('{"t":"move","dx":12,"dy":-7}', self.inj)
+        handle_tcp_command('{"t":"scroll","sx":0,"sy":4}', self.inj)
+        handle_tcp_command('{"t":"zoom","delta":-2}', self.inj)
         self.assertEqual(
             self.inj.events,
             [("move", 12, -7), ("scroll", 0, 4), ("zoom", -2)],

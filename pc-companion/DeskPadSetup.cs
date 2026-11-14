@@ -5,9 +5,16 @@ using System.Drawing.Drawing2D;
 using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Win32;
+using DeskPadSecurity;
+
+[assembly: AssemblyTitle("DeskPad PC Setup")]
+[assembly: AssemblyProduct("DeskPad PC")]
+[assembly: AssemblyVersion("1.0.1.0")]
+[assembly: AssemblyFileVersion("1.0.1.0")]
 
 namespace DeskPadSetup
 {
@@ -205,7 +212,7 @@ namespace DeskPadSetup
             Icon = _appIcon;
 
             _statusLine = uninstallMode
-                ? "Removes DeskPad PC, shortcuts, and startup entry."
+                ? "Removes DeskPad PC, its firewall rules, and shortcuts."
                 : "Installs DeskPad PC to " + InstallerEngine.InstallDir;
 
             _closeBtn = new PillButton
@@ -227,7 +234,7 @@ namespace DeskPadSetup
             {
                 _desktopCheck = new ToggleRow("Create Desktop shortcut", true) { Location = new Point(36, 174), Size = new Size(388, 26) };
                 _startMenuCheck = new ToggleRow("Add to Start Menu", true) { Location = new Point(36, 204), Size = new Size(388, 26) };
-                _startupCheck = new ToggleRow("Run DeskPad PC when Windows starts", false) { Location = new Point(36, 234), Size = new Size(388, 26) };
+                _startupCheck = new ToggleRow("Run DeskPad PC when Windows starts", InstallerEngine.IsStartupConfigured()) { Location = new Point(36, 234), Size = new Size(388, 26) };
                 _launchCheck = new ToggleRow("Launch DeskPad PC when finished", true) { Location = new Point(36, 264), Size = new Size(388, 26) };
                 Controls.AddRange(new Control[] { _desktopCheck, _startMenuCheck, _startupCheck, _launchCheck });
             }
@@ -386,7 +393,7 @@ namespace DeskPadSetup
 
             g.DrawIcon(_appIcon, new Rectangle(20, 16, 26, 26));
             TextRenderer.DrawText(g, _uninstallMode ? "Uninstall DeskPad PC" : "DeskPad PC Installer", new Font("Segoe UI", 11.5f, FontStyle.Bold), new Point(54, 14), _textPrimary);
-            TextRenderer.DrawText(g, "Version 1.0  •  Windows Companion", new Font("Segoe UI", 8f), new Point(54, 34), _textMuted);
+            TextRenderer.DrawText(g, "Version 1.0.1  •  Windows Companion", new Font("Segoe UI", 8f), new Point(54, 34), _textMuted);
 
             var card = new RectangleF(20, 62, 420, 94);
             using (var path = Gfx.RoundedRect(card, 14))
@@ -457,6 +464,12 @@ namespace DeskPadSetup
             return File.Exists(ExePath);
         }
 
+        public static bool IsStartupConfigured()
+        {
+            using (var key = Registry.CurrentUser.OpenSubKey(RunRegKey, false))
+                return key != null && key.GetValue("DeskPadPC") != null;
+        }
+
         public static void Install(bool createDesktop, bool createStartMenu, bool addStartup, bool launchAfter, Action<int, string> onProgress)
         {
             Action<int, string> report = delegate(int p, string m) { if (onProgress != null) onProgress(p, m); };
@@ -480,11 +493,15 @@ namespace DeskPadSetup
                     File.Copy(self, UninstallerCopyPath, true);
                 }
             }
-            catch { }
+            catch (Exception ex) { throw new IOException("The installed uninstaller could not be updated. Close other DeskPad setup windows and retry.", ex); }
 
             report(75, "Creating shortcuts & Windows app registration...");
             if (createStartMenu) CreateShortcut(StartMenuShortcut, ExePath, InstallDir, IcoPath);
             if (createDesktop) CreateShortcut(DesktopShortcut, ExePath, InstallDir, IcoPath);
+
+            report(85, "Requesting administrator approval for private-network firewall rules...");
+            FirewallResult firewall = FirewallRules.Apply(ExePath, GetAdjacentReceiverPath());
+            if (!firewall.Success) throw new InvalidOperationException(firewall.Message);
             SetStartup(addStartup);
             RegisterUninstallEntry();
 
@@ -500,6 +517,11 @@ namespace DeskPadSetup
             KillRunning();
             Thread.Sleep(250);
 
+            // Keep the installed helper and registration recoverable if elevation is
+            // canceled or managed policy prevents complete firewall cleanup.
+            FirewallResult firewall = FirewallRules.Remove(ExePath, GetAdjacentReceiverPath());
+            if (!firewall.Success) throw new InvalidOperationException(firewall.Message);
+
             TryDelete(StartMenuShortcut);
             TryDelete(DesktopShortcut);
             SetStartup(false);
@@ -513,17 +535,29 @@ namespace DeskPadSetup
                 string self = Application.ExecutablePath;
                 if (string.Equals(Path.GetFullPath(self), Path.GetFullPath(UninstallerCopyPath), StringComparison.OrdinalIgnoreCase))
                 {
-                    // Schedule self-cleanup after exit
-                    var psi = new ProcessStartInfo("cmd.exe", "/c timeout /t 2 >nul & rmdir /s /q \"" + InstallDir + "\"")
+                    // Delete only this known installer after exit; preserve any
+                    // unexpected user files/settings and never recurse the directory.
+                    string cleanup = "Start-Sleep -Seconds 2; $self=[Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('" +
+                        Convert.ToBase64String(Encoding.Unicode.GetBytes(UninstallerCopyPath)) + "')); " +
+                        "$dir=[Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('" +
+                        Convert.ToBase64String(Encoding.Unicode.GetBytes(InstallDir)) + "')); " +
+                        "Remove-Item -LiteralPath $self -Force -ErrorAction SilentlyContinue; " +
+                        "try { [IO.Directory]::Delete($dir, $false) } catch {}";
+                    string powershell = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System),
+                        "WindowsPowerShell", "v1.0", "powershell.exe");
+                    var psi = new ProcessStartInfo(powershell, "-NoLogo -NoProfile -NonInteractive -EncodedCommand " +
+                        Convert.ToBase64String(Encoding.Unicode.GetBytes(cleanup)))
                     {
                         CreateNoWindow = true,
-                        UseShellExecute = false
+                        UseShellExecute = false,
+                        WindowStyle = ProcessWindowStyle.Hidden
                     };
                     Process.Start(psi);
                 }
                 else
                 {
-                    if (Directory.Exists(InstallDir)) Directory.Delete(InstallDir, true);
+                    TryDelete(UninstallerCopyPath);
+                    if (Directory.Exists(InstallDir)) Directory.Delete(InstallDir, false);
                 }
             }
             catch { }
@@ -535,10 +569,27 @@ namespace DeskPadSetup
             {
                 foreach (var p in Process.GetProcessesByName("DeskPadPC"))
                 {
-                    try { p.Kill(); p.WaitForExit(1500); } catch { }
+                    using (p)
+                    {
+                        try
+                        {
+                            if (!string.Equals(Path.GetFullPath(p.MainModule.FileName), Path.GetFullPath(ExePath), StringComparison.OrdinalIgnoreCase)) continue;
+                            p.Kill();
+                            if (!p.WaitForExit(5000)) throw new InvalidOperationException("DeskPad PC could not be stopped. Close it and retry.");
+                        }
+                        catch (InvalidOperationException) { throw; }
+                        catch (System.ComponentModel.Win32Exception) { throw new InvalidOperationException("Close the installed DeskPad PC before continuing."); }
+                    }
                 }
             }
+            catch (InvalidOperationException) { throw; }
             catch { }
+        }
+
+        private static string GetAdjacentReceiverPath()
+        {
+            string adjacent = Path.Combine(Path.GetDirectoryName(Application.ExecutablePath), "DeskPadPC.exe");
+            return adjacent.StartsWith(@"\\", StringComparison.Ordinal) ? null : adjacent;
         }
 
         private static void ExtractResource(string resourceName, string targetPath)
@@ -595,14 +646,17 @@ namespace DeskPadSetup
             {
                 if (key == null) return;
                 key.SetValue("DisplayName", "DeskPad PC");
-                key.SetValue("DisplayVersion", "1.0.0");
+                key.SetValue("DisplayVersion", "1.0.1");
                 key.SetValue("Publisher", "DeskPad");
                 key.SetValue("DisplayIcon", IcoPath);
                 key.SetValue("InstallLocation", InstallDir);
                 key.SetValue("UninstallString", "\"" + UninstallerCopyPath + "\" /uninstall");
                 key.SetValue("NoModify", 1, RegistryValueKind.DWord);
                 key.SetValue("NoRepair", 1, RegistryValueKind.DWord);
-                key.SetValue("EstimatedSize", 120, RegistryValueKind.DWord);
+                long bytes = 0;
+                foreach (string installedFile in new string[] { ExePath, IcoPath, UninstallerCopyPath })
+                    if (File.Exists(installedFile)) bytes += new FileInfo(installedFile).Length;
+                key.SetValue("EstimatedSize", (int)Math.Min(int.MaxValue, (bytes + 1023) / 1024), RegistryValueKind.DWord);
             }
         }
 

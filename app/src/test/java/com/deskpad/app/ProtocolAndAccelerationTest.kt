@@ -15,15 +15,14 @@ class ProtocolAndAccelerationTest {
     @Test
     fun parseDiscoveryOffer_validPayload_returnsHost() {
         val host = ProtocolCodec.parseDiscoveryOffer(
-            "DESKPAD_OFFER_V1|Mateo-PC|Windows 11|48912|48911",
+            "DESKPAD_OFFER_V2|Mateo-PC|Windows|48912",
             "192.168.1.42"
         )
         assertNotNull(host)
         assertEquals("Mateo-PC", host!!.name)
-        assertEquals("Windows 11", host.os)
+        assertEquals("Windows", host.os)
         assertEquals("192.168.1.42", host.ip)
         assertEquals(48912, host.tcpPort)
-        assertEquals(48911, host.udpPort)
     }
 
     @Test

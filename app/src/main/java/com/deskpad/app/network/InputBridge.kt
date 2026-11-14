@@ -11,6 +11,7 @@ import com.deskpad.app.model.TransportMode
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -22,7 +23,7 @@ import kotlinx.coroutines.launch
 class InputBridge(context: Context) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
-    val wifi = PcClientManager()
+    val wifi = PcClientManager(context.applicationContext)
     val bluetooth = BluetoothHidManager(context)
 
     private val _activeMode = MutableStateFlow(TransportMode.WIFI)
@@ -65,9 +66,26 @@ class InputBridge(context: Context) {
         wifi.startDiscovery()
     }
 
-    fun connectWifi(ip: String, tcpPort: Int, udpPort: Int, name: String) {
+    fun connectWifi(ip: String, tcpPort: Int, name: String, pairingCode: String?, replacePairing: Boolean) {
         setMode(TransportMode.WIFI)
-        wifi.connect(ip, tcpPort, udpPort, name)
+        wifi.connect(ip, tcpPort, name, pairingCode, replacePairing)
+    }
+
+    fun connectWifiQr(envelope: PairingEnvelope, scanGeneration: Long): Boolean {
+        if (!wifi.isGenerationCurrent(scanGeneration)) return false
+        setMode(TransportMode.WIFI)
+        wifi.connectPairedHosts(envelope)
+        return true
+    }
+
+    fun connectWifiPin(ip: String, name: String, pin: CharArray, generation: Long): Boolean {
+        // Preserve the dialog's generation all the way into the manager's locked start.
+        // connectPin itself closes the old Wi-Fi session; do not increment its generation via setMode.
+        if (!wifi.connectPin(ip, name, pin, generation)) return false
+        bluetooth.disconnect()
+        _activeMode.value = TransportMode.WIFI
+        _connectionState.value = wifi.connectionState.value
+        return true
     }
 
     fun connectBluetooth(device: BluetoothDevice?) {
@@ -78,6 +96,12 @@ class InputBridge(context: Context) {
     fun disconnect() {
         wifi.disconnect()
         bluetooth.disconnect()
+    }
+
+    fun close() {
+        wifi.close()
+        bluetooth.close()
+        scope.cancel()
     }
 
     fun moveCursor(dx: Int, dy: Int) {

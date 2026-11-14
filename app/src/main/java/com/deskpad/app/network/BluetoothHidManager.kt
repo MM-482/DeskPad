@@ -37,6 +37,7 @@ class BluetoothHidManager(private val context: Context) {
     private var hostDevice: BluetoothDevice? = null
     private var buttonMask: Int = 0
     private var appRegistered = false
+    @Volatile private var closed = false
 
     private val executor = Executors.newSingleThreadExecutor()
 
@@ -70,6 +71,7 @@ class BluetoothHidManager(private val context: Context) {
 
     @SuppressLint("MissingPermission")
     fun startHidProfile(targetDevice: BluetoothDevice? = null) {
+        if (closed) return
         if (!hasPermissions()) {
             _connectionState.value = ConnectionState.Error("Bluetooth permissions required")
             return
@@ -84,6 +86,10 @@ class BluetoothHidManager(private val context: Context) {
         val serviceListener = object : BluetoothProfile.ServiceListener {
             override fun onServiceConnected(profile: Int, proxy: BluetoothProfile) {
                 if (profile != BluetoothProfile.HID_DEVICE) return
+                if (closed) {
+                    adapter?.closeProfileProxy(profile, proxy)
+                    return
+                }
                 val hid = proxy as BluetoothHidDevice
                 hidDevice = hid
                 registerApp(hid, targetDevice)
@@ -174,6 +180,15 @@ class BluetoothHidManager(private val context: Context) {
         hostDevice = null
         appRegistered = false
         _connectionState.value = ConnectionState.Disconnected
+    }
+
+    @SuppressLint("MissingPermission")
+    fun close() {
+        closed = true
+        disconnect()
+        hidDevice?.let { runCatching { adapter?.closeProfileProxy(BluetoothProfile.HID_DEVICE, it) } }
+        hidDevice = null
+        executor.shutdownNow()
     }
 
     @SuppressLint("MissingPermission")
