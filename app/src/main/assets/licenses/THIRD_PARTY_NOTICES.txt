@@ -1,0 +1,33 @@
+DeskPad QR and PIN pairing — third-party notices
+
+JourneyApps ZXing Android Embedded 4.3.0
+Coordinate: com.journeyapps:zxing-android-embedded:4.3.0
+Purpose: Android camera barcode scanning.
+License: Apache License 2.0; see JourneyApps-4.3.0-COPYING.txt.
+Upstream: https://github.com/journeyapps/zxing-android-embedded/tree/v4.3.0
+The tagged upstream README prints this attribution (retained verbatim):
+Copyright (C) 2012-201 ZXing authors, Journey Mobile
+
+ZXing core 3.4.1
+Coordinate: com.google.zxing:core:3.4.1
+Purpose: Barcode/QR decoding used by the scanner.
+Attribution: ZXing authors.
+License: see the complete ZXing-core-3.4.1-LICENSE.txt (Apache License 2.0
+and additional aggregate upstream notices).
+Upstream NOTICE: ZXing-3.4.1-NOTICE.txt, preserved verbatim.
+Upstream: https://github.com/zxing/zxing/tree/zxing-3.4.1
+The full upstream license/NOTICE files include aggregate notices for the larger
+ZXing distribution; this does not state that DeskPad uses all those components.
+
+Bouncy Castle Java 1.87
+Coordinate: org.bouncycastle:bcprov-jdk15to18:1.87
+Purpose: Lightweight SRP-6a password-authenticated key agreement for PIN pairing.
+License: MIT; see the verbatim BouncyCastle-Java-1.87-LICENSE.html.
+Copyright (c) 2000-2026 The Legion of the Bouncy Castle Inc.
+Upstream: https://github.com/bcgit/bc-java/tree/r1rv87
+The lightweight API is used without installing a global cryptography provider.
+
+These third-party licenses do not supply a license for DeskPad's own source.
+DeskPad currently has no project LICENSE file. The source package also includes
+THIRD_PARTY_NOTICES.md and the separate MIT notices for the Windows QRCoder and
+Bouncy Castle libraries.

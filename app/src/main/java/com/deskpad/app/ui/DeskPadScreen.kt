@@ -33,6 +33,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -52,9 +53,12 @@ import com.deskpad.app.model.AppSettings
 import com.deskpad.app.model.ConnectionState
 import com.deskpad.app.model.MouseButton
 import com.deskpad.app.model.SpecialKey
+import com.deskpad.app.model.TransportMode
 import com.deskpad.app.network.InputBridge
 import com.deskpad.app.ui.components.ConnectionSheet
 import com.deskpad.app.ui.components.KeyboardDeck
+import com.deskpad.app.ui.components.MainQrPairingButton
+import com.deskpad.app.ui.components.MainPinPairingButton
 import com.deskpad.app.ui.components.SettingsSheet
 import com.deskpad.app.ui.components.TrackpadSurface
 import com.deskpad.app.ui.theme.LocalDeskPadPalette
@@ -72,6 +76,16 @@ fun DeskPadScreen(
     val activeMode by bridge.activeMode.collectAsState()
     val discoveredHosts by bridge.discoveredHosts.collectAsState()
     val pairedBtDevices by bridge.pairedBtDevices.collectAsState()
+    val authenticatedHost by bridge.wifi.authenticatedHost.collectAsState()
+
+    LaunchedEffect(authenticatedHost) {
+        authenticatedHost?.let { host ->
+            onUpdateSettings(settings.copy(
+                lastHostIp = host.ip, lastHostPort = host.tcpPort,
+                lastHostName = host.name, transportMode = TransportMode.WIFI
+            ))
+        }
+    }
 
     var showConnectionSheet by remember { mutableStateOf(false) }
     var showSettingsSheet by remember { mutableStateOf(false) }
@@ -133,6 +147,22 @@ fun DeskPadScreen(
                     )
                 }
             }
+        }
+
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        MainQrPairingButton(
+            modifier = Modifier.weight(1f),
+            enabled = connectionState !is ConnectionState.Connecting,
+            connectionGeneration = { bridge.wifi.connectionGeneration() },
+            onPair = { envelope, generation ->
+                showConnectionSheet = false
+                bridge.connectWifiQr(envelope, generation)
+            }
+        )
+        MainPinPairingButton(bridge, discoveredHosts, connectionState, Modifier.weight(1f))
+        }
+        (connectionState as? ConnectionState.Error)?.let {
+            Text(it.message, fontSize = 12.sp, color = palette.textPrimary)
         }
 
         // Streamlined Quick Media + Keyboard Toggle Bar
@@ -299,17 +329,18 @@ fun DeskPadScreen(
             },
             onRefreshWifi = { bridge.startDiscovery() },
             onRefreshBluetooth = { bridge.bluetooth.refreshPairedDevices() },
-            onConnectWifi = { ip, tcpPort, udpPort, name ->
+            onHasWifiPairing = { ip, port -> bridge.wifi.hasSavedPairing(ip, port) },
+            onForgetWifiPairing = { ip, port -> bridge.wifi.forgetPairing(ip, port) },
+            onConnectWifi = { ip, tcpPort, name, pairingCode, replacePairing ->
                 onUpdateSettings(
                     settings.copy(
                         lastHostIp = ip,
                         lastHostPort = tcpPort,
-                        lastHostUdpPort = udpPort,
                         lastHostName = name,
                         transportMode = com.deskpad.app.model.TransportMode.WIFI
                     )
                 )
-                bridge.connectWifi(ip, tcpPort, udpPort, name)
+                bridge.connectWifi(ip, tcpPort, name, pairingCode, replacePairing)
             },
             onConnectBluetooth = { dev ->
                 onUpdateSettings(

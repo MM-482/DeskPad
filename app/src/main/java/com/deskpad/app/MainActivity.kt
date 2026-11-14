@@ -1,5 +1,6 @@
 package com.deskpad.app
 
+import android.app.Application
 import android.graphics.Color
 import android.os.Bundle
 import android.view.WindowManager
@@ -12,18 +13,20 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.ViewModelProvider
 import com.deskpad.app.model.SettingsStore
 import com.deskpad.app.network.InputBridge
 import com.deskpad.app.ui.DeskPadScreen
 import com.deskpad.app.ui.theme.DeskPadTheme
 
 class MainActivity : ComponentActivity() {
-    private lateinit var bridge: InputBridge
+    private val connectionModel by lazy { ViewModelProvider(this)[DeskPadConnectionViewModel::class.java] }
+    private val bridge: InputBridge get() = connectionModel.bridge
     private lateinit var settingsStore: SettingsStore
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        bridge = InputBridge(applicationContext)
         settingsStore = SettingsStore(applicationContext)
 
         val initialSettings = settingsStore.load()
@@ -62,10 +65,13 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    override fun onDestroy() {
-        if (isFinishing && !isChangingConfigurations) {
-            bridge.disconnect()
-        }
-        super.onDestroy()
+}
+
+/** One bridge survives Activity recreation and closes only when this screen's owner is cleared. */
+class DeskPadConnectionViewModel(application: Application) : AndroidViewModel(application) {
+    val bridge = InputBridge(application.applicationContext)
+    override fun onCleared() {
+        bridge.close()
+        super.onCleared()
     }
 }

@@ -14,6 +14,7 @@ using System.Threading;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
 using Microsoft.Win32;
+using DeskPadSecurity;
 
 namespace DeskPadPC
 {
@@ -25,6 +26,8 @@ namespace DeskPadPC
         [STAThread]
         private static void Main()
         {
+            PairingQrSupport.Initialize();
+            PinPairingSupport.Initialize();
             try { SetProcessDPIAware(); } catch { }
             bool createdNew;
             using (var mutex = new Mutex(true, "DeskPadPC_SingleInstance_Mutex", out createdNew))
@@ -119,7 +122,6 @@ namespace DeskPadPC
     internal sealed class DeskPadForm : Form
     {
         private const int DiscoveryPort = 48910;
-        private const int UdpPort = 48911;
         private const int TcpPort = 48912;
 
         private readonly UiPalette _tactilePalette = new UiPalette
@@ -167,9 +169,12 @@ namespace DeskPadPC
         private readonly PillButton _firewallBtn;
         private readonly PillButton _startupBtn;
         private readonly PillButton _trayBtn;
+        private readonly PillButton _pairBtn;
+        private readonly LanIdentity _identity;
 
         private readonly NotifyIcon _trayIcon;
-        private readonly ServerEngine _engine;
+        private ServerEngine _engine;
+        private bool _lanStarted;
         private readonly System.Windows.Forms.Timer _uiTimer;
         private readonly Icon _appIcon;
         private bool _allowExit;
@@ -189,7 +194,7 @@ namespace DeskPadPC
             Text = "DeskPad PC";
             FormBorderStyle = FormBorderStyle.None;
             StartPosition = FormStartPosition.CenterScreen;
-            ClientSize = new Size(440, 356);
+            ClientSize = new Size(440, 412);
             BackColor = _theme.Background;
 
             _appIcon = LoadEmbeddedIcon();
@@ -226,10 +231,10 @@ namespace DeskPadPC
                 }
             };
 
-            _firewallBtn = new PillButton { Text = "Allow Firewall", Location = new Point(20, 294), Size = new Size(126, 38), CornerRadius = 12 };
+            _firewallBtn = new PillButton { Text = "Allow Firewall", Location = new Point(20, 350), Size = new Size(126, 38), CornerRadius = 12 };
             _firewallBtn.Click += delegate { ConfigureFirewallRule(); };
 
-            _startupBtn = new PillButton { Text = IsStartupEnabled() ? "Startup: On" : "Startup: Off", Location = new Point(156, 294), Size = new Size(126, 38), CornerRadius = 12 };
+            _startupBtn = new PillButton { Text = IsStartupEnabled() ? "Startup: On" : "Startup: Off", Location = new Point(156, 350), Size = new Size(126, 38), CornerRadius = 12 };
             _startupBtn.Click += delegate
             {
                 bool next = !IsStartupEnabled();
@@ -238,10 +243,12 @@ namespace DeskPadPC
                 ApplyPalette();
             };
 
-            _trayBtn = new PillButton { Text = "Hide to Tray", Location = new Point(292, 294), Size = new Size(128, 38), CornerRadius = 12, HasBorder = false };
+            _trayBtn = new PillButton { Text = "Hide to Tray", Location = new Point(292, 350), Size = new Size(128, 38), CornerRadius = 12, HasBorder = false };
             _trayBtn.Click += delegate { Hide(); };
 
-            Controls.AddRange(new Control[] { _themeBtn, _minBtn, _closeBtn, _copyBtn, _firewallBtn, _startupBtn, _trayBtn });
+            _pairBtn = new PillButton { Text = "Pair phone / Reset access", Location = new Point(20, 294), Size = new Size(400, 42), CornerRadius = 12 };
+            _pairBtn.Click += delegate { ShowPairingDialog(); };
+            Controls.AddRange(new Control[] { _themeBtn, _minBtn, _closeBtn, _copyBtn, _firewallBtn, _startupBtn, _trayBtn, _pairBtn });
 
             var menu = new ContextMenuStrip();
             menu.Items.Add("Open DeskPad PC", null, delegate { ShowAndActivate(); });
@@ -268,8 +275,33 @@ namespace DeskPadPC
             ApplyPalette();
             UpdateWindowRegion();
 
-            _engine = new ServerEngine(DiscoveryPort, UdpPort, TcpPort, OnStatusChanged, OnInputActivity);
-            _engine.Start();
+            try
+            {
+                _identity = LanIdentity.LoadOrCreate();
+                _engine = new ServerEngine(DiscoveryPort, TcpPort, _identity, OnStatusChanged, OnInputActivity);
+                _statusText = "Checking Windows network access...";
+                _activityText = "Wi-Fi stays off until Private-only rules are verified";
+                _firewallBtn.Enabled = false;
+                Shown += delegate
+                {
+                    string receiverPath = Application.ExecutablePath;
+                    ThreadPool.QueueUserWorkItem(delegate
+                    {
+                        FirewallResult result = FirewallRules.Check(receiverPath);
+                        if (IsDisposed) return;
+                        try { BeginInvoke((MethodInvoker)delegate { FinishFirewallCheck(result, false); }); }
+                        catch (InvalidOperationException) { }
+                    });
+                };
+            }
+            catch (Exception)
+            {
+                if (_engine != null) _engine.Stop();
+                _pairBtn.Enabled = false;
+                _statusText = "Wi-Fi disabled";
+                _activityText = "Could not load identity or open secure listener";
+                MessageBox.Show("DeskPad could not start secure Wi-Fi. No insecure fallback was opened. Check that another receiver is not running and that this user's LAN identity storage is accessible. See the security update guide for explicit identity reset instructions.", "DeskPad PC", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
 
             _uiTimer = new System.Windows.Forms.Timer { Interval = 350 };
             _uiTimer.Tick += delegate
@@ -306,6 +338,7 @@ namespace DeskPadPC
             styleSec(_closeBtn, false);
             styleSec(_copyBtn, false);
             styleSec(_firewallBtn, false);
+            styleSec(_pairBtn, false);
             styleSec(_startupBtn, IsStartupEnabled());
 
             _trayBtn.FillColor = _theme.Accent;
@@ -355,7 +388,7 @@ namespace DeskPadPC
             // Header Icon + Title
             g.DrawIcon(_appIcon, new Rectangle(20, 16, 26, 26));
             TextRenderer.DrawText(g, "DeskPad PC", new Font("Segoe UI", 11.5f, FontStyle.Bold), new Point(54, 14), _theme.TextPrimary);
-            TextRenderer.DrawText(g, "v1.0 • " + _theme.Name, new Font("Segoe UI", 8f), new Point(54, 34), _theme.TextMuted);
+            TextRenderer.DrawText(g, "v1.0.1 • " + _theme.Name, new Font("Segoe UI", 8f), new Point(54, 34), _theme.TextMuted);
 
             // Status Hero Card
             var statusCard = new RectangleF(20, 62, 400, 92);
@@ -397,10 +430,10 @@ namespace DeskPadPC
 
             string allIps = NetworkUtils.GetLocalIpsText();
             string subNet = string.IsNullOrEmpty(_copiedNotice)
-                ? string.Format("Ports: Discovery {0}  •  UDP {1}  •  TCP {2}", DiscoveryPort, UdpPort, TcpPort)
+                ? string.Format("Private LAN: Discovery {0}  •  TLS {1}", DiscoveryPort, TcpPort)
                 : _copiedNotice + "  (" + allIps + ")";
             TextRenderer.DrawText(g, subNet, new Font("Segoe UI", 8.5f), new Rectangle(36, 234, 368, 18), _theme.TextMuted, TextFormatFlags.EndEllipsis);
-            TextRenderer.DrawText(g, "Open DeskPad on your phone → Link → tap this PC", new Font("Segoe UI", 8.2f), new Rectangle(36, 254, 368, 18), _theme.Accent, TextFormatFlags.EndEllipsis);
+            TextRenderer.DrawText(g, "Pair once, then Link → select this PC", new Font("Segoe UI", 8.2f), new Rectangle(36, 254, 368, 18), _theme.Accent, TextFormatFlags.EndEllipsis);
         }
 
         private void DrawCardPattern(Graphics g, RectangleF rect)
@@ -432,25 +465,147 @@ namespace DeskPadPC
 
         private void ConfigureFirewallRule()
         {
-            try
+            _firewallBtn.Enabled = false;
+            _activityText = "Waiting for firewall approval...";
+            string receiverPath = Application.ExecutablePath;
+            ThreadPool.QueueUserWorkItem(delegate
             {
-                string cmd = "/c netsh advfirewall firewall delete rule name=\"DeskPad PC\" >nul 2>&1 & " +
-                             "netsh advfirewall firewall add rule name=\"DeskPad PC\" dir=in action=allow protocol=UDP localport=48910-48911 & " +
-                             "netsh advfirewall firewall add rule name=\"DeskPad PC\" dir=in action=allow protocol=TCP localport=48912";
-                var psi = new ProcessStartInfo("cmd.exe", cmd)
+                FirewallResult result = FirewallRules.Apply(receiverPath);
+                if (IsDisposed) return;
+                try
                 {
-                    Verb = "runas",
-                    UseShellExecute = true,
-                    WindowStyle = ProcessWindowStyle.Hidden
-                };
-                Process.Start(psi);
-                _activityText = "Firewall ports 48910-48912 rule requested";
-                Invalidate();
-            }
-            catch
+                    BeginInvoke((MethodInvoker)delegate
+                    {
+                        FinishFirewallCheck(result, true);
+                    });
+                }
+                catch (InvalidOperationException) { }
+            });
+        }
+
+        private void FinishFirewallCheck(FirewallResult result, bool showFailure)
+        {
+            _firewallBtn.Enabled = true;
+            if (result.Success && _identity != null)
             {
-                _activityText = "Firewall prompt canceled";
-                Invalidate();
+                if (!_lanStarted)
+                {
+                    try
+                    {
+                        _engine = new ServerEngine(DiscoveryPort, TcpPort, _identity, OnStatusChanged, OnInputActivity);
+                        _engine.Start(); _lanStarted = true;
+                        _statusText = "Waiting for paired phone";
+                        _activityText = "Private LAN verified • Encrypted pairing required";
+                    }
+                    catch
+                    {
+                        if (_engine != null) _engine.Stop();
+                        _statusText = "Wi-Fi disabled";
+                        _activityText = "Could not open the secure receiver ports";
+                    }
+                }
+            }
+            else
+            {
+                if (_engine != null) _engine.Stop();
+                _lanStarted = false;
+                _statusText = "Wi-Fi disabled — firewall setup required";
+                _activityText = "Click Allow Firewall to restrict access to Private LAN";
+                if (showFailure) MessageBox.Show(result.Message, "DeskPad firewall", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+            Invalidate();
+        }
+
+        private void ShowPairingDialog()
+        {
+            if (_identity == null || _engine == null) return;
+            using (var dialog = new Form())
+            {
+                dialog.Text = "Pair a phone with DeskPad";
+                dialog.StartPosition = FormStartPosition.CenterParent;
+                dialog.FormBorderStyle = FormBorderStyle.FixedDialog;
+                dialog.MaximizeBox = false; dialog.MinimizeBox = false;
+                dialog.AutoScaleMode = AutoScaleMode.Dpi;
+                dialog.AutoScaleDimensions = new SizeF(96f, 96f);
+                dialog.ClientSize = new Size(780, 608);
+                dialog.BackColor = _theme.Background; dialog.ForeColor = _theme.TextPrimary;
+                var heading = new Label { Text = "Pair your phone", Location = new Point(24, 20), Size = new Size(732, 30), Font = new Font("Segoe UI", 13f, FontStyle.Bold) };
+                var instruction = new Label { Text = "On your phone: tap Scan QR and point the camera here", Location = new Point(24, 60), Size = new Size(732, 40), Font = new Font("Segoe UI", 10f) };
+                var picture = new PictureBox { Location = new Point(24, 112), Size = new Size(360, 360), BackColor = Color.White, SizeMode = PictureBoxSizeMode.CenterImage, AccessibleName = "Private DeskPad pairing QR code" };
+                var warning = new Label { Text = "The QR and PIN grant control of this PC. Keep them private and reset access if they are shared.", Location = new Point(24, 490), Size = new Size(732, 42), Font = new Font("Segoe UI", 9f) };
+                var pinHeading = new Label { Text = "Or use a temporary PIN", Location = new Point(424, 116), Size = new Size(332, 30), Font = new Font("Segoe UI", 11f, FontStyle.Bold) };
+                var pinDigits = new Label { Text = "------", Location = new Point(424, 156), Size = new Size(332, 54), Font = new Font("Consolas", 28f, FontStyle.Bold), AccessibleName = "Temporary pairing PIN closed" };
+                var pinStatus = new Label { Location = new Point(424, 224), Size = new Size(332, 72), Font = new Font("Segoe UI", 10f) };
+                var newPin = new Button { Text = "New PIN", Location = new Point(424, 312), Size = new Size(200, 36) };
+                var pinHelp = new Label { Text = "On your phone, tap Enter PIN, choose this PC and enter the PIN. It expires after 2 minutes, 5 attempts, or one successful pairing.", Location = new Point(424, 372), Size = new Size(332, 88), Font = new Font("Segoe UI", 9f) };
+                var pinTimer = new System.Windows.Forms.Timer { Interval = 250 };
+                Action updatePinStatus = delegate
+                {
+                    if (!_engine.PinPairing.IsOpen)
+                    {
+                        pinDigits.Text = "------";
+                        pinDigits.AccessibleName = "Temporary pairing PIN closed";
+                        pinStatus.Text = "PIN closed. Choose New PIN to pair another phone.";
+                    }
+                    else
+                    {
+                        int seconds = Math.Max(0, (int)Math.Ceiling((_engine.PinPairing.ExpiresUtc - DateTime.UtcNow).TotalSeconds));
+                        pinStatus.Text = string.Format("Expires in {0}:{1:00}\n{2} attempts remaining", seconds / 60, seconds % 60, _engine.PinPairing.RemainingAttempts);
+                    }
+                };
+                Action openPin = delegate
+                {
+                    try { pinDigits.Text = _engine.PinPairing.Open(); pinDigits.AccessibleName = "Temporary pairing PIN: " + pinDigits.Text; updatePinStatus(); }
+                    catch { pinDigits.Text = "------"; pinDigits.AccessibleName = "Temporary pairing PIN closed"; pinStatus.Text = "PIN unavailable. Use the QR or try again."; }
+                };
+                newPin.Click += delegate { openPin(); };
+                pinTimer.Tick += delegate { updatePinStatus(); };
+                var copy = new Button { Text = "Copy code (advanced)", Location = new Point(24, 550), Size = new Size(190, 36) };
+                copy.Click += delegate
+                {
+                    try { Clipboard.SetText(_identity.PairingCode); copy.Text = "Copied"; }
+                    catch { MessageBox.Show("The clipboard is unavailable. Scan the QR instead.", "DeskPad", MessageBoxButtons.OK, MessageBoxIcon.Information); }
+                };
+                Action refreshQr = delegate
+                {
+                    Image previous = picture.Image;
+                    picture.Image = null;
+                    if (previous != null) previous.Dispose();
+                    try
+                    {
+                        int size = Math.Min(picture.ClientSize.Width, picture.ClientSize.Height);
+                        picture.Image = PairingQrSupport.CreateForThisPc(_identity.PairingCode, size);
+                        picture.AccessibleDescription = "Scan this QR in the DeskPad phone app. Keep it private.";
+                    }
+                    catch (NoPairingLanAddressException)
+                    {
+                        picture.AccessibleDescription = "No local IPv4 address. Connect to a trusted home network or use manual pairing.";
+                        MessageBox.Show("No eligible local IPv4 address is available. Connect this PC to your trusted home Wi-Fi or Ethernet network, then reopen this window. You can also use Copy code (advanced) with manual pairing.", "DeskPad", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    }
+                    catch
+                    {
+                        picture.AccessibleDescription = "QR unavailable. Use Copy code (advanced).";
+                        MessageBox.Show("The pairing QR could not be generated. Use Copy code (advanced) and paste it into DeskPad's manual pairing field.", "DeskPad", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    }
+                };
+                var reset = new Button { Text = "Reset access", Location = new Point(224, 550), Size = new Size(130, 36) };
+                reset.Click += delegate
+                {
+                    if (MessageBox.Show("Disconnect all phones and invalidate every saved pairing code? You will need to pair your phones again.", "Reset DeskPad access", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
+                    try { _engine.ResetPairing(); copy.Text = "Copy code (advanced)"; refreshQr(); updatePinStatus(); }
+                    catch { MessageBox.Show("Could not save new pairing credentials. Access was not reset.", "DeskPad", MessageBoxButtons.OK, MessageBoxIcon.Error); }
+                };
+                var close = new Button { Text = "Close", Location = new Point(624, 550), Size = new Size(132, 36), DialogResult = DialogResult.OK };
+                dialog.Controls.AddRange(new Control[] { heading, instruction, picture, warning, pinHeading, pinDigits, pinStatus, newPin, pinHelp, copy, reset, close });
+                dialog.Shown += delegate { refreshQr(); openPin(); pinTimer.Start(); };
+                dialog.CancelButton = close;
+                try { dialog.ShowDialog(this); }
+                finally
+                {
+                    pinTimer.Stop(); pinTimer.Dispose(); _engine.PinPairing.Close(); pinDigits.Text = "------"; pinDigits.AccessibleName = "Temporary pairing PIN closed";
+                    Image image = picture.Image; picture.Image = null;
+                    if (image != null) image.Dispose();
+                }
             }
         }
 
@@ -508,9 +663,10 @@ namespace DeskPadPC
             {
                 BeginInvoke((MethodInvoker)delegate
                 {
+                    if (!_lanStarted) return;
                     _connected = connected;
                     _statusText = message;
-                    if (!connected) _activityText = "Idle • Ready for Wi-Fi discovery";
+                    if (!connected) _activityText = "Encrypted Wi-Fi • Waiting for paired phone";
                     _trayIcon.Text = connected ? "DeskPad PC • " + message : "DeskPad PC • Waiting";
                     Invalidate();
                 });
@@ -542,227 +698,11 @@ namespace DeskPadPC
                 return;
             }
             _uiTimer.Stop();
-            _engine.Stop();
+            if (_engine != null) _engine.Stop();
             _trayIcon.Visible = false;
             _trayIcon.Dispose();
+            if (_identity != null) _identity.Dispose();
             base.OnFormClosing(e);
-        }
-    }
-
-    internal sealed class ServerEngine
-    {
-        private readonly int _discoveryPort;
-        private readonly int _udpPort;
-        private readonly int _tcpPort;
-        private readonly Action<bool, string> _onStatus;
-        private readonly Action<string> _onActivity;
-        private readonly JavaScriptSerializer _json = new JavaScriptSerializer();
-
-        private volatile bool _running;
-        private UdpClient _discoverySock;
-        private UdpClient _udpSock;
-        private TcpListener _tcpListener;
-
-        public ServerEngine(int discoveryPort, int udpPort, int tcpPort, Action<bool, string> onStatus, Action<string> onActivity)
-        {
-            _discoveryPort = discoveryPort;
-            _udpPort = udpPort;
-            _tcpPort = tcpPort;
-            _onStatus = onStatus;
-            _onActivity = onActivity;
-        }
-
-        public void Start()
-        {
-            _running = true;
-            StartThread(DiscoveryLoop, "DeskPadDiscovery");
-            StartThread(UdpLoop, "DeskPadUdp");
-            StartThread(TcpAcceptLoop, "DeskPadTcpAccept");
-        }
-
-        public void Stop()
-        {
-            _running = false;
-            try { if (_discoverySock != null) _discoverySock.Close(); } catch { }
-            try { if (_udpSock != null) _udpSock.Close(); } catch { }
-            try { if (_tcpListener != null) _tcpListener.Stop(); } catch { }
-        }
-
-        private static void StartThread(ThreadStart entry, string name)
-        {
-            var t = new Thread(entry) { IsBackground = true, Name = name };
-            t.Start();
-        }
-
-        private void DiscoveryLoop()
-        {
-            try
-            {
-                _discoverySock = new UdpClient(_discoveryPort);
-                string offerText = string.Format("DESKPAD_OFFER_V1|{0}|Windows|{1}|{2}", Environment.MachineName, _tcpPort, _udpPort);
-                byte[] offerBytes = Encoding.UTF8.GetBytes(offerText);
-
-                while (_running)
-                {
-                    IPEndPoint remote = new IPEndPoint(IPAddress.Any, 0);
-                    byte[] data = _discoverySock.Receive(ref remote);
-                    string msg = Encoding.UTF8.GetString(data).Trim();
-                    if (msg == "DESKPAD_DISCOVER_V1")
-                    {
-                        _discoverySock.Send(offerBytes, offerBytes.Length, remote);
-                        _onActivity("Discovery ping from " + remote.Address);
-                    }
-                }
-            }
-            catch { }
-        }
-
-        private void UdpLoop()
-        {
-            try
-            {
-                _udpSock = new UdpClient(_udpPort);
-                while (_running)
-                {
-                    IPEndPoint remote = new IPEndPoint(IPAddress.Any, 0);
-                    byte[] data = _udpSock.Receive(ref remote);
-                    string payload = Encoding.UTF8.GetString(data).Trim();
-                    string[] parts = payload.Split('|');
-                    if (parts.Length == 0) continue;
-
-                    if (parts[0] == "M" && parts.Length == 3)
-                    {
-                        int dx, dy;
-                        if (int.TryParse(parts[1], out dx) && int.TryParse(parts[2], out dy))
-                        {
-                            Win32Input.Move(dx, dy);
-                            _onActivity("Active: Pointer stream");
-                        }
-                    }
-                    else if (parts[0] == "S" && parts.Length == 3)
-                    {
-                        int sx, sy;
-                        if (int.TryParse(parts[1], out sx) && int.TryParse(parts[2], out sy))
-                        {
-                            Win32Input.Scroll(sx, sy);
-                            _onActivity("Active: Two-finger scroll");
-                        }
-                    }
-                    else if (parts[0] == "Z" && parts.Length == 2)
-                    {
-                        int dz;
-                        if (int.TryParse(parts[1], out dz))
-                        {
-                            Win32Input.Zoom(dz);
-                            _onActivity("Active: Pinch zoom");
-                        }
-                    }
-                }
-            }
-            catch { }
-        }
-
-        private void TcpAcceptLoop()
-        {
-            try
-            {
-                _tcpListener = new TcpListener(IPAddress.Any, _tcpPort);
-                _tcpListener.Start();
-                while (_running)
-                {
-                    TcpClient client = _tcpListener.AcceptTcpClient();
-                    client.NoDelay = true;
-                    ThreadPool.QueueUserWorkItem(HandleTcpClient, client);
-                }
-            }
-            catch { }
-        }
-
-        private void HandleTcpClient(object state)
-        {
-            var client = (TcpClient)state;
-            string remoteIp = ((IPEndPoint)client.Client.RemoteEndPoint).Address.ToString();
-            _onStatus(true, "Connected • " + remoteIp);
-            _onActivity("Phone linked over Wi-Fi");
-
-            try
-            {
-                using (client)
-                using (var stream = client.GetStream())
-                using (var reader = new StreamReader(stream, Encoding.UTF8))
-                using (var writer = new StreamWriter(stream, new UTF8Encoding(false)) { AutoFlush = true })
-                {
-                    writer.WriteLine(_json.Serialize(new Dictionary<string, object>
-                    {
-                        { "t", "hello" },
-                        { "name", Environment.MachineName }
-                    }));
-
-                    string line;
-                    while (_running && (line = reader.ReadLine()) != null)
-                    {
-                        if (string.IsNullOrWhiteSpace(line)) continue;
-                        ProcessTcpLine(line, writer);
-                    }
-                }
-            }
-            catch { }
-            finally
-            {
-                _onStatus(false, "Waiting for DeskPad phone");
-            }
-        }
-
-        private void ProcessTcpLine(string line, StreamWriter writer)
-        {
-            Dictionary<string, object> msg;
-            try { msg = _json.Deserialize<Dictionary<string, object>>(line); }
-            catch { return; }
-            if (msg == null || !msg.ContainsKey("t")) return;
-
-            string type = Convert.ToString(msg["t"]);
-            if (type == "ping")
-            {
-                object ts = msg.ContainsKey("ts") ? msg["ts"] : 0;
-                writer.WriteLine(_json.Serialize(new Dictionary<string, object> { { "t", "pong" }, { "ts", ts } }));
-            }
-            else if (type == "click")
-            {
-                string btn = msg.ContainsKey("b") ? Convert.ToString(msg["b"]) : "L";
-                int count = msg.ContainsKey("c") ? Convert.ToInt32(msg["c"]) : 1;
-                Win32Input.Click(btn, count);
-                _onActivity("Click: " + (btn == "R" ? "Right" : (btn == "M" ? "Middle" : "Left")));
-            }
-            else if (type == "btn")
-            {
-                string btn = msg.ContainsKey("b") ? Convert.ToString(msg["b"]) : "L";
-                bool down = msg.ContainsKey("d") && Convert.ToBoolean(msg["d"]);
-                Win32Input.MouseButton(btn, down);
-            }
-            else if (type == "text")
-            {
-                string val = msg.ContainsKey("v") ? Convert.ToString(msg["v"]) : "";
-                if (!string.IsNullOrEmpty(val))
-                {
-                    bool ok = Win32Input.SendText(val);
-                    _onActivity(ok ? "Typing text" : "Blocked: target window is Admin");
-                }
-            }
-            else if (type == "key")
-            {
-                string k = msg.ContainsKey("k") ? Convert.ToString(msg["k"]) : "";
-                var mods = new List<string>();
-                if (msg.ContainsKey("m"))
-                {
-                    var rawMods = msg["m"] as System.Collections.IEnumerable;
-                    if (rawMods != null)
-                    {
-                        foreach (object m in rawMods) if (m != null) mods.Add(m.ToString());
-                    }
-                }
-                bool ok = Win32Input.SendKey(k, mods);
-                _onActivity(ok ? ("Key: " + k) : "Blocked: target window is Admin");
-            }
         }
     }
 
@@ -997,6 +937,12 @@ namespace DeskPadPC
             else if (keyName.Length == 1) ok &= SendText(keyName);
             for (int i = modVks.Count - 1; i >= 0; i--) KeyVk(modVks[i], false);
             return ok;
+        }
+
+        internal static bool IsSupportedKey(string keyName)
+        {
+            return keyName != null && (VkMap.ContainsKey(keyName) ||
+                (keyName.Length == 1 && keyName[0] >= 32 && keyName[0] <= 126));
         }
 
         private static ushort? ResolveVk(string keyName)

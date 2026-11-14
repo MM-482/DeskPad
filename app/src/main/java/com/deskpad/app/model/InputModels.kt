@@ -27,7 +27,6 @@ data class DiscoveredHost(
     val name: String,
     val ip: String,
     val tcpPort: Int,
-    val udpPort: Int,
     val os: String
 )
 
@@ -121,31 +120,31 @@ class PointerMotionAccumulator {
 }
 
 /**
- * Serializes compact UDP datagrams and JSON-line TCP packets for the PC receiver.
+ * Serializes V2 discovery offers and JSON-line commands for the authenticated TLS receiver.
  */
 object ProtocolCodec {
     const val DEFAULT_DISCOVERY_PORT = 48910
-    const val DEFAULT_UDP_PORT = 48911
     const val DEFAULT_TCP_PORT = 48912
-    const val DISCOVER_QUERY = "DESKPAD_DISCOVER_V1"
+    const val DISCOVER_QUERY = "DESKPAD_DISCOVER_V2"
+    const val MAX_TEXT_UNITS = 2048
 
     fun parseDiscoveryOffer(payload: String, senderIp: String): DiscoveredHost? {
-        val parts = payload.trim().split("|")
-        if (parts.size < 5 || parts[0] != "DESKPAD_OFFER_V1") return null
-        val tcpPort = parts[3].toIntOrNull() ?: DEFAULT_TCP_PORT
-        val udpPort = parts[4].toIntOrNull() ?: DEFAULT_UDP_PORT
+        if (payload.length > 256 || payload.any { it.code < 32 || it.code == 127 }) return null
+        val parts = payload.split("|")
+        if (parts.size != 4 || parts[0] != "DESKPAD_OFFER_V2") return null
+        if (parts[1].isBlank() || parts[1].length > 128 || parts[2] != "Windows") return null
+        val tcpPort = parts[3].toIntOrNull()?.takeIf { it in 1..65535 } ?: return null
         return DiscoveredHost(
-            name = parts[1].ifBlank { senderIp },
+            name = parts[1],
             ip = senderIp,
             tcpPort = tcpPort,
-            udpPort = udpPort,
-            os = parts[2].ifBlank { "PC" }
+            os = parts[2]
         )
     }
 
-    fun udpMovePacket(dx: Int, dy: Int): String = "M|$dx|$dy"
-    fun udpScrollPacket(sx: Int, sy: Int): String = "S|$sx|$sy"
-    fun udpZoomPacket(delta: Int): String = "Z|$delta"
+    fun tcpMovePacket(dx: Int, dy: Int): String = """{"t":"move","dx":$dx,"dy":$dy}"""
+    fun tcpScrollPacket(sx: Int, sy: Int): String = """{"t":"scroll","sx":$sx,"sy":$sy}"""
+    fun tcpZoomPacket(delta: Int): String = """{"t":"zoom","delta":$delta}"""
 
     fun tcpPingPacket(timestampMs: Long): String =
         """{"t":"ping","ts":$timestampMs}"""
@@ -156,8 +155,10 @@ object ProtocolCodec {
     fun tcpMouseButtonPacket(button: MouseButton, down: Boolean): String =
         """{"t":"btn","b":"${button.wireCode}","d":$down}"""
 
-    fun tcpTextPacket(text: String): String =
-        """{"t":"text","v":"${escapeJson(text)}"}"""
+    fun tcpTextPacket(text: String): String {
+        require(text.length <= MAX_TEXT_UNITS) { "Text must be at most $MAX_TEXT_UNITS UTF-16 units" }
+        return """{"t":"text","v":"${escapeJson(text)}"}"""
+    }
 
     fun tcpKeyPacket(keyName: String, modifiers: ModifierState = ModifierState()): String {
         val mods = modifiers.toWireList().joinToString(",") { "\"$it\"" }
@@ -172,7 +173,7 @@ object ProtocolCodec {
                 '\n' -> append("\\n")
                 '\r' -> append("\\r")
                 '\t' -> append("\\t")
-                else -> append(ch)
+                else -> if (ch.code < 32) append("\\u%04x".format(ch.code)) else append(ch)
             }
         }
     }
